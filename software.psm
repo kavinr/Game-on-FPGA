@@ -1,0 +1,482 @@
+;;============================================================================
+;; File: software.psm
+;; This is the PicoBlaze program for EE178 Lab #8.
+;;============================================================================
+
+;;============================================================================
+;; Ports and related constants.
+;;============================================================================
+
+CONSTANT stax            , 00 ; port for 8-bit start-x
+CONSTANT stay            , 01 ; port for 8-bit start-y
+CONSTANT endx            , 02 ; port for 8-bit end-x
+CONSTANT endy            , 03 ; port for 8-bit end-y
+CONSTANT busy            , 04 ; port for 8-bit busy
+CONSTANT beam            , 05 ; port for 8-bit beam
+CONSTANT mode            , 06 ; port for 8-bit mode
+CONSTANT prng            , 07 ; port for 8-bit prng
+CONSTANT leds_lo         , 08 ; port for 8-bit led data out
+CONSTANT leds_hi         , 09 ; port for 8-bit led data out
+CONSTANT qssd_lo         , 0a ; port for 8-bit qssd data out
+CONSTANT qssd_hi         , 0b ; port for 8-bit qssd data out
+CONSTANT qssd_dp         , 0c ; port for 8-bit qssd data out
+CONSTANT switches_lo     , 0d ; port for 8-bit switch input
+CONSTANT switches_hi     , 0e ; port for 8-bit switch input
+CONSTANT buttons         , 0f ; port for 8-bit button input
+CONSTANT ramex_addr      , 10 ; port for 8-bit ram address
+CONSTANT ramex_data      , 11 ; port for 8-bit ram data
+
+CONSTANT busy_go         , 01 ; go command and busy status
+
+CONSTANT beam_hi         , 0f ; beam high intensity
+CONSTANT beam_md         , 07 ; beam med intensity
+CONSTANT beam_lo         , 03 ; beam low intensity
+
+CONSTANT mode_hld        , 00 ; mode hold framebuffer
+CONSTANT mode_clr        , 01 ; mode clear framebuffer
+CONSTANT mode_lin        , 02 ; mode linear decay
+CONSTANT mode_exp        , 03 ; mode exponential decay
+
+CONSTANT buttons_ct      , 10 ; center
+CONSTANT buttons_up      , 08 ; up
+CONSTANT buttons_dn      , 04 ; down
+CONSTANT buttons_lf      , 02 ; left
+CONSTANT buttons_rt      , 01 ; right
+
+;;============================================================================
+;; Game state declarations.
+;;============================================================================
+
+NAMEREG s0, gs_major
+CONSTANT gs_major_attrone, 00
+CONSTANT gs_major_attrtwo, 01
+CONSTANT gs_major_playing, 02
+CONSTANT gs_major_gameend, 03
+
+NAMEREG s1, gs_minor
+CONSTANT gs_minor_begins , 00
+CONSTANT gs_minor_twosec , 7f
+CONSTANT gs_minor_onesec , 3f
+CONSTANT gs_minor_getrdy , 1f
+CONSTANT gs_minor_gamego , 20
+
+NAMEREG s2, gs_ballx
+NAMEREG s3, gs_bally
+CONSTANT gs_ball_xdim    , 08
+CONSTANT gs_ball_ydim    , 08
+
+NAMEREG s4, gs_padlx
+CONSTANT gs_padly        , e0
+CONSTANT gs_padl_xdim    , 20
+CONSTANT gs_padl_ydim    , 08
+
+NAMEREG s5, gs_balldx
+NAMEREG s6, gs_balldy
+CONSTANT gs_ball_delta   , 01
+
+NAMEREG s7, gs_padldx
+CONSTANT gs_padl_delta   , 02
+
+;;============================================================================
+;; Other stuff...
+;;============================================================================
+
+CONSTANT minusone        , ff ; minusone
+CONSTANT zero            , 00 ; zero
+CONSTANT one             , 01 ; one
+
+NAMEREG s8, reserved8
+NAMEREG s9, reserved9
+NAMEREG sA, reservedA
+NAMEREG sB, reservedB
+
+NAMEREG sC, xpos
+NAMEREG sD, ypos
+NAMEREG sE, btnsamp
+NAMEREG sF, scratch
+
+;;============================================================================
+;; Boot.
+;; This performs one-time initialization of the hardware and the game state.
+;;============================================================================
+
+         boot: CALL hw_initialize                  ; initial hardware setup
+               CALL gs_initialize                  ; set initial game state
+               ENABLE INTERRUPT                    ; enable vblnk interrupt
+
+;;============================================================================
+;; Main.
+;; This is an empty loop, does nothing, waiting for interrupts to occur.
+;;============================================================================
+
+         main: JUMP main                           ; empty loop, does nothing
+
+;;============================================================================
+;; Interrupt.
+;; This is the main game logic.  At each interrupt, the procedure is to read
+;; the user input, calculate the next game state, and then render the game
+;; state on the display.
+;;============================================================================
+
+          isr: CALL rd_user_input
+               CALL calc_next_gs
+               CALL render_gs
+               RETURNI ENABLE
+
+;;============================================================================
+;; Subroutine: hw_initialize
+;; This puts the hardware into a known, initial state.  This includes a wait
+;; to make sure the line drawing harware is idle (a wait loop which is also
+;; called from other routines, as a subroutine).
+;;============================================================================
+
+hw_initialize: LOAD scratch, zero
+               OUTPUT scratch, leds_lo
+               OUTPUT scratch, leds_hi
+               OUTPUT scratch, qssd_lo
+               OUTPUT scratch, qssd_hi
+               OUTPUT scratch, qssd_dp
+               LOAD scratch, mode_lin
+               OUTPUT scratch, mode
+               LOAD scratch, beam_hi
+               OUTPUT scratch, beam
+wait_hw_ready: INPUT scratch, busy
+               COMPARE scratch, busy_go
+               JUMP Z, wait_hw_ready
+               RETURN
+
+;;============================================================================
+;; Subroutine: gs_initialize
+;; This puts the game into a known, initial state.
+;;============================================================================
+
+gs_initialize: LOAD gs_major, gs_major_attrone
+               LOAD gs_minor, gs_minor_begins
+               LOAD gs_ballx, zero
+               LOAD gs_bally, zero
+               LOAD gs_padlx, zero
+               LOAD gs_balldx, zero
+               LOAD gs_balldy, zero
+               LOAD gs_padldx, zero
+               RETURN
+
+;;============================================================================
+;; Subroutine: read_user_input
+;; This samples the user inputs required for this game (which happens to be
+;; only the buttons, but this could be extended to the switches as well).
+;; This subroutine calls an example of how to use the RAM expansion, by
+;; implementing access of a 256x8 array using switches, button, and qssd.
+;; The call to the ramex_example routine (and the ramex_example routine
+;; itself) can be entirely removed as it is not used in this game.
+;;============================================================================
+
+rd_user_input: INPUT btnsamp, buttons
+               CALL ramex_example
+               RETURN
+
+ramex_example: INPUT scratch, switches_hi
+               OUTPUT scratch, qssd_hi
+               OUTPUT scratch, ramex_addr
+               INPUT scratch, ramex_data
+               OUTPUT scratch, qssd_lo
+               INPUT scratch, buttons
+               TEST scratch, buttons_dn
+               RETURN Z
+               INPUT scratch, switches_lo
+               OUTPUT scratch, ramex_data
+               RETURN
+
+;;============================================================================
+;; Subroutine: calc_next_gs
+;; This logic calculates the next state of the game, given the sampled user
+;; inputs and the current state of the game.
+;;============================================================================
+
+ calc_next_gs: COMPARE gs_major, gs_major_attrone
+               JUMP Z, calc_attrone
+               COMPARE gs_major, gs_major_attrtwo
+               JUMP Z, calc_attrtwo
+               COMPARE gs_major, gs_major_playing
+               JUMP Z, calc_playing
+               COMPARE gs_major, gs_major_gameend
+               JUMP Z, calc_gameend
+               RETURN
+
+ calc_attrone: TEST btnsamp, buttons_ct
+               JUMP NZ, goto_playing
+               COMPARE gs_minor, gs_minor_twosec
+               JUMP Z, goto_attrtwo
+               ADD gs_minor, one
+               RETURN
+
+ calc_attrtwo: TEST btnsamp, buttons_ct
+               JUMP NZ, goto_playing
+               COMPARE gs_minor, gs_minor_onesec
+               JUMP Z, goto_attrone
+               ADD gs_minor, one
+               RETURN
+
+ calc_playing: COMPARE gs_minor, gs_minor_onesec
+               JUMP Z, goto_gameend
+               ADD gs_minor, one
+               RETURN
+
+ calc_gameend: COMPARE gs_minor, gs_minor_onesec
+               JUMP Z, goto_attrone
+               ADD gs_minor, one
+               RETURN
+
+ goto_attrone: LOAD gs_major, gs_major_attrone
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+ goto_attrtwo: LOAD gs_major, gs_major_attrtwo
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+ goto_playing: LOAD gs_major, gs_major_playing
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+ goto_gameend: LOAD gs_major, gs_major_gameend
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+;;============================================================================
+;; Subroutine: render_gs
+;; This uses the current game state as input, and renders it on the display.
+;; This subroutine calls an example of how to output debug or diagnostic info
+;; using the leds.  The call to the render_debug routine (and the render_debug
+;; routine itself) can be entirely remove as it is not used in this game.
+;;============================================================================
+
+    render_gs: CALL render_debug
+               COMPARE gs_major, gs_major_attrone
+               JUMP Z, draw_attrone
+               COMPARE gs_major, gs_major_attrtwo
+               JUMP Z, draw_attrtwo
+               COMPARE gs_major, gs_major_playing
+               JUMP Z, draw_playing
+               COMPARE gs_major, gs_major_gameend
+               JUMP Z, draw_gameend
+               RETURN
+
+ render_debug: OUTPUT gs_major, leds_hi ; debug display
+               OUTPUT gs_minor, leds_lo ; debug display
+               RETURN
+
+ draw_attrone: LOAD xpos, 28 ; draw letter b
+               LOAD ypos, 50
+               CALL moveto
+               LOAD xpos, 28
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 48
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 48
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 28
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58 ; draw letter o
+               LOAD ypos, 70
+               CALL moveto
+               LOAD xpos, 58
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 88 ; draw letter n
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, 88
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, b8 ; draw letter g
+               LOAD ypos, b0
+               CALL moveto
+               LOAD xpos, d8
+               LOAD ypos, b0
+               CALL drawto
+               LOAD xpos, d8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, d8
+               LOAD ypos, 90
+               CALL drawto
+               RETURN
+
+ draw_attrtwo: LOAD xpos, 78 ; draw letter e
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, 58
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 58
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, a8 ; draw letter c
+               LOAD ypos, 70
+               CALL moveto
+               LOAD xpos, 88
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 88
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 90
+               CALL drawto
+               RETURN
+
+ draw_playing: LOAD xpos, gs_ballx ; draw ball
+               LOAD ypos, gs_bally
+               CALL moveto
+               LOAD xpos, gs_ballx
+               LOAD ypos, gs_bally
+               ADD ypos, gs_ball_ydim
+               CALL drawto
+               LOAD xpos, gs_ballx
+               LOAD ypos, gs_bally
+               ADD xpos, gs_ball_xdim
+               ADD ypos, gs_ball_ydim
+               CALL drawto
+               LOAD xpos, gs_ballx
+               LOAD ypos, gs_bally
+               ADD xpos, gs_ball_xdim
+               CALL drawto
+               LOAD xpos, gs_ballx
+               LOAD ypos, gs_bally
+               CALL drawto
+               LOAD xpos, gs_padlx ; draw padl
+               LOAD ypos, gs_padly
+               CALL moveto
+               LOAD xpos, gs_padlx
+               LOAD ypos, gs_padly
+               ADD ypos, gs_padl_ydim
+               CALL drawto
+               LOAD xpos, gs_padlx
+               LOAD ypos, gs_padly
+               ADD xpos, gs_padl_xdim
+               ADD ypos, gs_padl_ydim
+               CALL drawto
+               LOAD xpos, gs_padlx
+               LOAD ypos, gs_padly
+               ADD xpos, gs_padl_xdim
+               CALL drawto
+               LOAD xpos, gs_padlx
+               LOAD ypos, gs_padly
+               CALL drawto
+               RETURN
+
+ draw_gameend: LOAD xpos, 48 ; draw letter d
+               LOAD ypos, 50
+               CALL moveto
+               LOAD xpos, 48
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 28
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 28
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 48
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58 ; draw letter o
+               LOAD ypos, 70
+               CALL moveto
+               LOAD xpos, 58
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 88 ; draw letter n
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, 88
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, d8 ; draw letter e
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, b8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, d8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 90
+               CALL drawto
+               RETURN
+
+       moveto: OUTPUT xpos, endx
+               OUTPUT ypos, endy
+               RETURN
+
+       drawto: INPUT scratch, endx
+               OUTPUT scratch, stax
+               INPUT scratch, endy
+               OUTPUT scratch, stay
+               OUTPUT xpos, endx
+               OUTPUT ypos, endy
+               LOAD scratch, busy_go
+               OUTPUT scratch, busy
+               CALL wait_hw_ready
+               RETURN
+
+;;============================================================================
+;; Interrupt - Vector.
+;;============================================================================
+
+               ADDRESS 7FF                         ; must be located here
+   isr_vector: JUMP isr                            ; always jump to isr
+
+;;============================================================================
+;;
+;;============================================================================
